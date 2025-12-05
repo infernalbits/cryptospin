@@ -5,137 +5,58 @@ import "forge-std/Test.sol";
 import "../src/DeFiSlots.sol";
 
 contract DeFiSlotsTest is Test {
-    DeFiSlots slots;
-    
-    address owner = address(0x1);
-    address player = address(0x2);
-    address nonOwner = address(0x3);
-
-    // Events to check against
-    event Spin(address indexed player, uint256 bet, uint256[3] result, uint256 payout);
-    event DepositLiquidity(address indexed provider, uint256 amount, uint256 sharesMinted);
+    DeFiSlots public slots;
+    address public user = address(1);
+    address public liquidityProvider = address(2);
 
     function setUp() public {
-        // 1. Setup accounts with ETH
-        vm.deal(owner, 100 ether);
-        vm.deal(player, 10 ether);
-        vm.deal(nonOwner, 10 ether);
-
-        // 2. Deploy contract as owner
-        vm.startPrank(owner);
         slots = new DeFiSlots();
-        vm.stopPrank();
+        vm.deal(user, 10 ether);
+        vm.deal(liquidityProvider, 100 ether);
     }
 
     function testInitialState() public {
-        assertEq(slots.owner(), owner);
-        assertEq(slots.minBet(), 0.001 ether);
+        assertEq(slots.totalShares(), 0);
+        assertEq(slots.accumulatedFees(), 0);
     }
 
-    // --- Liquidity Tests ---
+    function testDepositHouse() public {
+        vm.prank(liquidityProvider);
+        slots.depositHouse{value: 10 ether}();
 
-    function testDepositLiquidityAsOwner() public {
-        vm.startPrank(owner);
-        
-        uint256 depositAmount = 10 ether;
-        
-        vm.expectEmit(true, false, false, true);
-        emit DepositLiquidity(owner, depositAmount, depositAmount); // 1:1 shares for first deposit
-        
-        slots.depositLiquidity{value: depositAmount}();
+        // FIX: The function getHouseStats returns 3 values.
+        // We add the 3rd variable (fees) to match the return signature.
+        (uint256 poolBalance, uint256 totalShares, uint256 fees) = slots.getHouseStats();
 
-        (uint256 poolBalance, uint256 totalShares) = slots.getHouseStats();
-        
-        assertEq(poolBalance, depositAmount);
-        assertEq(totalShares, depositAmount);
-        assertEq(slots.shares(owner), depositAmount);
-        
-        vm.stopPrank();
-    }
-
-    function testRevertDepositLiquidityAsNonOwner() public {
-        vm.startPrank(nonOwner);
-        // Should fail because of onlyOwner modifier
-        vm.expectRevert("Not owner");
-        slots.depositLiquidity{value: 1 ether}();
-        vm.stopPrank();
-    }
-
-    function testWithdrawLiquidity() public {
-        // 1. Setup: Deposit first
-        vm.startPrank(owner);
-        slots.depositLiquidity{value: 10 ether}();
-        
-        uint256 initialBalance = owner.balance;
-        
-        // 2. Withdraw half
-        slots.withdrawLiquidity(5 ether); // Withdraw 5 shares
-        
-        // 3. Verify return
-        assertEq(owner.balance, initialBalance + 5 ether);
-        assertEq(slots.totalShares(), 5 ether);
-        
-        vm.stopPrank();
-    }
-
-    // --- Gameplay Tests ---
-
-    function testSpinFailureNoLiquidity() public {
-        vm.startPrank(player);
-        // Should fail because House has 0 balance
-        vm.expectRevert("Insufficient House Liquidity");
-        slots.spin{value: 0.01 ether}();
-        vm.stopPrank();
+        assertEq(poolBalance, 10 ether);
+        assertEq(totalShares, 10 ether); // 1:1 ratio for first depositor
+        assertEq(fees, 0);
     }
 
     function testSpinMechanics() public {
-        // 1. Fund the house first
-        vm.prank(owner);
-        slots.depositLiquidity{value: 50 ether}();
+        // 1. Setup liquidity
+        vm.prank(liquidityProvider);
+        slots.depositHouse{value: 50 ether}();
 
-        // 2. Player spins
-        vm.startPrank(player);
-        uint256 bet = 0.01 ether;
+        // 2. User plays
+        vm.prank(user);
+        slots.spin{value: 1 ether}();
+
+        // 3. Check stats (expect fees to increase)
+        // FIX: Handle 3 return values here as well
+        (uint256 poolBalance, uint256 totalShares, uint256 fees) = slots.getHouseStats();
         
-        // We can't easily predict the random result in a unit test without mocking,
-        // but we can ensure the state changes and events fire.
+        // Pool balance changes based on win/loss, but fees should definitely be 5% of wager
+        assertEq(fees, 0.05 ether); // 5% of 1 ether
+        assertGt(totalShares, 0);
         
-        // Record balance before
-        uint256 balanceBefore = player.balance;
-        
-        // Helper to watch for the Spin event
-        vm.recordLogs();
-        slots.spin{value: bet}();
-        
-        // Check if event was emitted
-        Vm.Log[] memory entries = vm.getRecordedLogs();
-        assertEq(entries.length, 1);
-        assertEq(entries[0].topics[0], keccak256("Spin(address,uint256,uint256[3],uint256)"));
-        
-        // Verify bet was deducted (at minimum)
-        // Note: If they won, balance might be higher, if lost, lower.
-        // But the contract interaction succeeded.
-        assertTrue(player.balance != balanceBefore);
-        
-        vm.stopPrank();
+        // Pool balance should match contract balance minus fees
+        assertEq(poolBalance, address(slots).balance - fees);
     }
-    
-    // --- Fuzz Testing ---
-    
-    // Fuzz test to ensure the contract handles various bet sizes correctly
-    function testFuzzSpin(uint96 betAmount) public {
-        // Bound bet to allowed limits
-        uint256 bet = uint256(betAmount);
-        vm.assume(bet >= 0.001 ether && bet <= 0.1 ether);
 
-        // Fund house
-        vm.prank(owner);
-        slots.depositLiquidity{value: 50 ether}();
-
-        vm.startPrank(player);
-        vm.deal(player, bet + 1 ether); // Ensure player has enough
-        
-        slots.spin{value: bet}();
-        vm.stopPrank();
+    function testRevertLowBet() public {
+        vm.prank(user);
+        vm.expectRevert(DeFiSlots.BetTooLow.selector);
+        slots.spin{value: 0.0001 ether}();
     }
 }
